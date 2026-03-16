@@ -4,6 +4,7 @@ import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -27,6 +28,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.automirrored.filled.List
+import androidx.compose.material.icons.automirrored.filled.MenuBook
 import androidx.compose.material.icons.filled.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -42,6 +44,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -75,32 +78,38 @@ class MainActivity : ComponentActivity() {
     fun AppContent() {
         val scope = rememberCoroutineScope()
         var assets by remember { mutableStateOf<RecipeAssets?>(null) }
-        var selectedItemRecipes by remember { mutableStateOf<List<RecipeDump>?>(null) }
+        var navigationStack by remember { mutableStateOf(listOf<String>()) }
+        val currentItemId = navigationStack.lastOrNull()
+
         var debugItemId by remember { mutableStateOf<String?>(null) }
         var searchQuery by remember { mutableStateOf("") }
         var currentScreen by remember { mutableStateOf<Screen>(Screen.Recipes) }
-        var importedFiles by remember { mutableStateOf<List<File>>(emptyList()) }
-        var isLoading by remember { mutableStateOf(false) }
-        var loadingProgress by remember { mutableFloatStateOf(0f) }
+        var importedFolders by remember { mutableStateOf<List<File>>(emptyList()) }
+        var isIndexing by remember { mutableStateOf(false) }
+        var indexingProgress by remember { mutableFloatStateOf(0f) }
+        var indexingMessage by remember { mutableStateOf<String?>(null) }
         
         var showTagRecipes by remember { mutableStateOf(false) }
         var isDebugMode by remember { mutableStateOf(false) }
 
         LaunchedEffect(Unit) {
-            importedFiles = AssetManager.listImportedFiles(this@MainActivity)
-            val lastFile = AssetManager.getLastLoadedFile(this@MainActivity)
-            if (lastFile != null) {
-                val file = File(File(filesDir, "imported_assets"), lastFile)
-                if (file.exists()) {
-                    scope.launch {
-                        isLoading = true
-                        assets = AssetManager.loadAssetsFromFile(this@MainActivity, file) { progress: Float ->
-                            loadingProgress = progress
-                        }
-                        isLoading = false
+            importedFolders = AssetManager.listImportedFolders(this@MainActivity)
+            val lastFolder = AssetManager.getLastLoadedFolder(this@MainActivity)
+            if (lastFolder != null) {
+                scope.launch {
+                    isIndexing = true
+                    indexingMessage = "Loading library"
+                    assets = AssetManager.loadFromUnpacked(this@MainActivity, lastFolder) { progress: Float ->
+                        indexingProgress = progress
                     }
+                    isIndexing = false
+                    indexingMessage = null
                 }
             }
+        }
+
+        BackHandler(enabled = currentItemId != null) {
+            navigationStack = navigationStack.dropLast(1)
         }
 
         val pickerLauncher = rememberLauncherForActivityResult(
@@ -108,16 +117,18 @@ class MainActivity : ComponentActivity() {
         ) { uri: Uri? ->
             uri?.let {
                 scope.launch {
-                    isLoading = true
-                    loadingProgress = 0f
+                    isIndexing = true
+                    indexingProgress = 0f
+                    indexingMessage = "Importing and indexing .aei"
                     val imported = AssetManager.importAeiFile(this@MainActivity, it) { progress: Float ->
-                        loadingProgress = progress
+                        indexingProgress = progress
                     }
                     if (imported != null) {
                         assets = imported
-                        importedFiles = AssetManager.listImportedFiles(this@MainActivity)
+                        importedFolders = AssetManager.listImportedFolders(this@MainActivity)
                     }
-                    isLoading = false
+                    isIndexing = false
+                    indexingMessage = null
                 }
             }
         }
@@ -128,17 +139,37 @@ class MainActivity : ComponentActivity() {
                 Surface(elevation = 4.dp) {
                     Column(modifier = Modifier.statusBarsPadding()) {
                         TopAppBar(
-                            title = { Text(currentScreen.title) },
+                            title = { 
+                                if (currentItemId != null && assets != null) {
+                                    Text(assets!!.getTranslation(currentItemId), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                } else {
+                                    Text(currentScreen.title) 
+                                }
+                            },
+                            navigationIcon = if (currentItemId != null) {
+                                {
+                                    IconButton(onClick = { navigationStack = navigationStack.dropLast(1) }) {
+                                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                                    }
+                                }
+                            } else null,
                             elevation = 0.dp,
                             actions = {
                                 if (currentScreen == Screen.Recipes) {
+                                    IconButton(onClick = { 
+                                        assets = null
+                                        navigationStack = listOf()
+                                        searchQuery = "" 
+                                    }) {
+                                        Icon(Icons.AutoMirrored.Filled.MenuBook, contentDescription = "Library")
+                                    }
                                     TextButton(onClick = { pickerLauncher.launch("*/*") }, colors = ButtonDefaults.textButtonColors(contentColor = Color.White)) {
                                         Text("IMPORT")
                                     }
                                 }
                             }
                         )
-                        if (currentScreen == Screen.Recipes && assets != null) {
+                        if (currentScreen == Screen.Recipes && assets != null && currentItemId == null) {
                             SearchField(searchQuery) { searchQuery = it }
                         }
                     }
@@ -165,45 +196,60 @@ class MainActivity : ComponentActivity() {
                     is Screen.Recipes -> {
                         if (assets == null) {
                             ImportLibrary(
-                                importedFiles = importedFiles,
-                                onFileSelected = { file ->
+                                importedFolders = importedFolders,
+                                onFolderSelected = { folder ->
                                     scope.launch {
-                                        isLoading = true
-                                        loadingProgress = 0f
-                                        assets = AssetManager.loadAssetsFromFile(this@MainActivity, file) { progress: Float ->
-                                            loadingProgress = progress
+                                        isIndexing = true
+                                        indexingProgress = 0f
+                                        indexingMessage = "Loading ${folder.name}"
+                                        assets = AssetManager.loadFromUnpacked(this@MainActivity, folder.name) { progress: Float ->
+                                            indexingProgress = progress
                                         }
-                                        isLoading = false
+                                        isIndexing = false
+                                        indexingMessage = null
                                     }
                                 },
-                                onFileDelete = { file ->
-                                    AssetManager.deleteImportedFile(this@MainActivity, file)
-                                    importedFiles = AssetManager.listImportedFiles(this@MainActivity)
+                                onFolderDelete = { folder ->
+                                    AssetManager.deleteUnpackedFolder(this@MainActivity, folder)
+                                    importedFolders = AssetManager.listImportedFolders(this@MainActivity)
                                 },
                                 onImportClick = { pickerLauncher.launch("*/*") }
                             )
                         } else {
-                            val filteredIds = remember(searchQuery, assets, showTagRecipes) {
-                                assets!!.uniqueItems.filter { id ->
-                                    val name = assets!!.getTranslation(id)
-                                    name.contains(searchQuery, ignoreCase = true) || id.contains(searchQuery, ignoreCase = true)
+                            if (currentItemId == null) {
+                                val filteredIds = remember(searchQuery, assets, showTagRecipes) {
+                                    assets!!.uniqueItems.filter { id ->
+                                        val name = assets!!.getTranslation(id)
+                                        name.contains(searchQuery, ignoreCase = true) || id.contains(searchQuery, ignoreCase = true)
+                                    }
                                 }
-                            }
 
-                            LazyVerticalGrid(
-                                columns = GridCells.Adaptive(minSize = 100.dp),
-                                contentPadding = PaddingValues(8.dp),
-                                modifier = Modifier.fillMaxSize()
-                            ) {
-                                items(filteredIds) { id ->
-                                    ItemCard(id, assets!!, isDebugMode) { isLongClick ->
-                                        if (isLongClick && isDebugMode) {
-                                            debugItemId = id
-                                        } else {
-                                            selectedItemRecipes = assets!!.recipesByOutput[id]
+                                LazyVerticalGrid(
+                                    columns = GridCells.Adaptive(minSize = 100.dp),
+                                    contentPadding = PaddingValues(8.dp),
+                                    modifier = Modifier.fillMaxSize()
+                                ) {
+                                    items(filteredIds) { id ->
+                                        ItemCard(id, assets!!, isDebugMode) { isLongClick ->
+                                            if (isLongClick && isDebugMode) {
+                                                debugItemId = id
+                                            } else {
+                                                navigationStack = navigationStack + id
+                                            }
                                         }
                                     }
                                 }
+                            } else {
+                                RecipeView(
+                                    itemId = currentItemId,
+                                    assets = assets!!,
+                                    onIngredientClick = { targetId ->
+                                        val normalized = targetId.lowercase()
+                                        if (normalized != "unknown" && assets!!.recipesByOutput.containsKey(targetId)) {
+                                            navigationStack = navigationStack + targetId
+                                        }
+                                    }
+                                )
                             }
                         }
                     }
@@ -217,21 +263,344 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
-                if (isLoading) {
-                    LoadingOverlay(loadingProgress)
+                if (isIndexing) {
+                    IndexingBanner(
+                        progress = indexingProgress,
+                        message = indexingMessage ?: "Indexing library",
+                        modifier = Modifier
+                            .align(Alignment.BottomCenter)
+                            .padding(12.dp)
+                    )
                 }
 
                 debugItemId?.let { id ->
                     ItemDebugDialog(id, assets!!, onDismiss = { debugItemId = null })
                 }
+            }
+        }
+    }
 
-                selectedItemRecipes?.let { recipes ->
-                    RecipeBrowserDialog(recipes, assets!!) {
-                        selectedItemRecipes = null
+    @Composable
+    fun RecipeView(itemId: String, assets: RecipeAssets, onIngredientClick: (String) -> Unit) {
+        val recipes = remember(itemId, assets) { assets.recipesByOutput[itemId] ?: emptyList() }
+        val recipesByType = remember(recipes) { recipes.groupBy { it.recipeType } }
+        val types = remember(recipesByType) { recipesByType.keys.toList() }
+        
+        var selectedTypeIndex by remember(itemId) { mutableIntStateOf(0) }
+        
+        if (recipes.isEmpty()) {
+            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Text("No recipes found for this item.", color = Color.Gray)
+            }
+            return
+        }
+
+        Column(modifier = Modifier.fillMaxSize()) {
+            if (types.size > 1) {
+                ScrollableTabRow(
+                    selectedTabIndex = selectedTypeIndex,
+                    backgroundColor = MaterialTheme.colors.surface,
+                    contentColor = MaterialTheme.colors.primary,
+                    edgePadding = 16.dp
+                ) {
+                    types.forEachIndexed { index, type ->
+                        Tab(
+                            selected = selectedTypeIndex == index,
+                            onClick = { selectedTypeIndex = index },
+                            text = { Text(type.substringAfterLast(":").replace("_", " ").uppercase(), fontSize = 12.sp) }
+                        )
+                    }
+                }
+            } else if (types.isNotEmpty()) {
+                Surface(elevation = 2.dp, modifier = Modifier.fillMaxWidth()) {
+                    Text(
+                        text = types[0].substringAfterLast(":").replace("_", " ").uppercase(),
+                        modifier = Modifier.padding(16.dp),
+                        style = MaterialTheme.typography.subtitle2,
+                        color = MaterialTheme.colors.primary,
+                        textAlign = TextAlign.Center
+                    )
+                }
+            }
+
+            val selectedType = types.getOrNull(selectedTypeIndex) ?: types.firstOrNull()
+            if (selectedType == null) {
+                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Text("No recipes found for this item.", color = Color.Gray)
+                }
+                return
+            }
+
+            val currentTypeRecipes = recipesByType[selectedType] ?: emptyList()
+            var currentRecipeIndex by remember(itemId, selectedType) { mutableIntStateOf(0) }
+
+            Column(modifier = Modifier.weight(1f).padding(16.dp).verticalScroll(rememberScrollState())) {
+                if (currentTypeRecipes.size > 1) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        IconButton(onClick = { if (currentRecipeIndex > 0) currentRecipeIndex-- }, enabled = currentRecipeIndex > 0) {
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = null)
+                        }
+                        Text("Recipe ${currentRecipeIndex + 1} of ${currentTypeRecipes.size}", style = MaterialTheme.typography.caption)
+                        IconButton(onClick = { if (currentRecipeIndex < currentTypeRecipes.size - 1) currentRecipeIndex++ }, enabled = currentRecipeIndex < currentTypeRecipes.size - 1) {
+                            Icon(Icons.AutoMirrored.Filled.ArrowForward, contentDescription = null)
+                        }
+                    }
+                    Spacer(Modifier.height(8.dp))
+                }
+
+                val recipe = currentTypeRecipes.getOrNull(currentRecipeIndex)
+                if (recipe == null) {
+                    Text("No recipes found for this type.", color = Color.Gray)
+                    return@Column
+                }
+                val isStandardCraftingRecipe = remember(recipe) {
+                    val type = recipe.recipeType.lowercase()
+                    val recipeClass = recipe.recipeClass.lowercase()
+                    (type.contains("crafting") || recipeClass.contains("craft"))
+                }
+
+                if (isStandardCraftingRecipe) {
+                    CraftingRecipeLayout(recipe, assets, onIngredientClick)
+                } else {
+                    Text("Output", style = MaterialTheme.typography.h6)
+                    recipe.slots.filter { it.role == "OUTPUT" }.forEach { slot ->
+                        CyclingIngredientRow(slot.ingredients, assets, onIngredientClick)
+                    }
+
+                    Spacer(Modifier.height(16.dp))
+                    Text("Input", style = MaterialTheme.typography.h6)
+
+                    val inputSlots = recipe.slots.filter { it.role == "INPUT" }
+                    if (inputSlots.isEmpty()) {
+                        Text("No inputs required", color = Color.Gray, fontStyle = androidx.compose.ui.text.font.FontStyle.Italic)
+                    } else {
+                        inputSlots.forEach { slot ->
+                            CyclingIngredientRow(slot.ingredients, assets, onIngredientClick)
+                        }
                     }
                 }
             }
         }
+    }
+
+    @Composable
+    fun CraftingRecipeLayout(recipe: RecipeDump, assets: RecipeAssets, onIngredientClick: (String) -> Unit) {
+        val outputIngredients = recipe.slots.filter { it.role == "OUTPUT" }.flatMap { it.ingredients }
+        val inputSlots = recipe.slots.filter { it.role == "INPUT" }
+        val gridColumns = if (inputSlots.size <= 4) 2 else 3
+
+        Text("Output", style = MaterialTheme.typography.h6)
+        if (outputIngredients.isNotEmpty()) {
+            Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.TopStart) {
+                CraftingIngredientCell(
+                    ingredients = outputIngredients,
+                    assets = assets,
+                    onIngredientClick = onIngredientClick,
+                    modifier = Modifier.size(120.dp)
+                )
+            }
+        } else {
+            Text("No output found", color = Color.Gray, fontStyle = androidx.compose.ui.text.font.FontStyle.Italic)
+        }
+
+        Spacer(Modifier.height(10.dp))
+        Text("Grid", style = MaterialTheme.typography.h6)
+
+        if (inputSlots.isEmpty()) {
+            Text("No inputs required", color = Color.Gray, fontStyle = androidx.compose.ui.text.font.FontStyle.Italic)
+            return
+        }
+
+        Spacer(Modifier.height(4.dp))
+        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            inputSlots.chunked(gridColumns).forEach { rowSlots ->
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    rowSlots.forEach { slot ->
+                        CraftingIngredientCell(
+                            ingredients = slot.ingredients,
+                            assets = assets,
+                            onIngredientClick = onIngredientClick,
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+
+                    repeat(gridColumns - rowSlots.size) {
+                        Spacer(modifier = Modifier.weight(1f))
+                    }
+                }
+            }
+        }
+    }
+
+    @Composable
+    fun CraftingIngredientCell(
+        ingredients: List<Ingredient>,
+        assets: RecipeAssets,
+        onIngredientClick: (String) -> Unit,
+        modifier: Modifier = Modifier
+    ) {
+        if (ingredients.isEmpty()) {
+            Card(modifier = modifier.aspectRatio(1f), shape = RoundedCornerShape(8.dp), elevation = 1.dp) {
+                Box(modifier = Modifier.fillMaxSize().background(MaterialTheme.colors.surface.copy(alpha = 0.35f)))
+            }
+            return
+        }
+
+        var currentIndex by remember { mutableIntStateOf(0) }
+
+        LaunchedEffect(ingredients) {
+            if (ingredients.size > 1) {
+                while (true) {
+                    delay(2000)
+                    currentIndex = (currentIndex + 1) % ingredients.size
+                }
+            }
+        }
+
+        val ingredient = ingredients[currentIndex]
+        val id = ingredient.getResolvedId() ?: "Unknown"
+        val count = ingredient.count?.toLong() ?: ingredient.amount ?: 1L
+        val extraData = remember(ingredient) { ingredient.getExplicitDataSummary() }
+        var bitmap by remember(id) { mutableStateOf<Bitmap?>(null) }
+
+        LaunchedEffect(id) {
+            withContext(Dispatchers.IO) {
+                bitmap = AssetManager.loadBitmap(assets.imagePaths[id])
+            }
+        }
+
+        Card(
+            modifier = modifier
+                .aspectRatio(1f)
+                .clickable { onIngredientClick(id) },
+            shape = RoundedCornerShape(8.dp),
+            elevation = 2.dp,
+            backgroundColor = MaterialTheme.colors.surface
+        ) {
+            Box(modifier = Modifier.fillMaxSize().padding(3.dp)) {
+                Column(
+                    modifier = Modifier.fillMaxSize(),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center
+                ) {
+                    bitmap?.let {
+                        Image(bitmap = it.asImageBitmap(), contentDescription = null, modifier = Modifier.size(24.dp))
+                    } ?: MissingTexturePlaceholder(Modifier.size(24.dp))
+                    Spacer(Modifier.height(2.dp))
+                    Text(
+                        text = assets.getTranslation(id),
+                        fontSize = 9.sp,
+                        textAlign = TextAlign.Center,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    if (extraData != null) {
+                        Text(
+                            text = extraData,
+                            fontSize = 8.sp,
+                            textAlign = TextAlign.Center,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            color = Color.Gray
+                        )
+                    }
+                }
+                Text(
+                    text = "x$count",
+                    modifier = Modifier.align(Alignment.BottomEnd),
+                    fontSize = 9.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colors.primary
+                )
+            }
+        }
+    }
+
+    @Composable
+    fun CyclingIngredientRow(ingredients: List<Ingredient>, assets: RecipeAssets, onIngredientClick: (String) -> Unit) {
+        if (ingredients.isEmpty()) return
+        
+        var currentIndex by remember { mutableIntStateOf(0) }
+        
+        LaunchedEffect(ingredients) {
+            if (ingredients.size > 1) {
+                while (true) {
+                    delay(1000)
+                    currentIndex = (currentIndex + 1) % ingredients.size
+                }
+            }
+        }
+
+        val ingredient = ingredients[currentIndex]
+        val id = ingredient.getResolvedId() ?: "Unknown"
+        val count = ingredient.count?.toLong() ?: ingredient.amount ?: 1L
+        val extraData = remember(ingredient) { ingredient.getExplicitDataSummary() }
+        
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 4.dp)
+                .background(MaterialTheme.colors.surface, RoundedCornerShape(8.dp))
+                .clickable { onIngredientClick(id) }
+                .padding(8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            var bitmap by remember(id) { mutableStateOf<Bitmap?>(null) }
+            LaunchedEffect(id) {
+                withContext(Dispatchers.IO) {
+                    bitmap = AssetManager.loadBitmap(assets.imagePaths[id])
+                }
+            }
+
+            Box(modifier = Modifier.size(40.dp)) {
+                bitmap?.let {
+                    Image(bitmap = it.asImageBitmap(), contentDescription = null, modifier = Modifier.size(40.dp))
+                } ?: MissingTexturePlaceholder(Modifier.size(40.dp))
+            }
+
+            Spacer(Modifier.width(12.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(assets.getTranslation(id), fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                if (extraData != null) {
+                    Text(extraData, style = MaterialTheme.typography.caption, color = Color.Gray, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+                if (ingredients.size > 1) {
+                    Text("OR ${ingredients.size - 1} other variants", style = MaterialTheme.typography.caption, color = MaterialTheme.colors.primary)
+                }
+            }
+            Text("x$count", fontWeight = FontWeight.Black, color = MaterialTheme.colors.primary)
+        }
+    }
+
+    private fun Ingredient.getExplicitDataSummary(): String? {
+        fun compact(value: String): String {
+            return value
+                .replace(Regex("\\s+"), " ")
+                .trim()
+                .take(90)
+        }
+
+        if (!nbt.isNullOrBlank()) {
+            return "NBT: ${compact(nbt)}"
+        }
+
+        if (!unknown.isNullOrBlank()) {
+            return "Data: ${compact(unknown)}"
+        }
+
+        val typeValue = type?.trim()?.lowercase()
+        if (!typeValue.isNullOrBlank() && typeValue !in setOf("item", "block", "fluid")) {
+            return "Type: $typeValue"
+        }
+
+        return null
     }
 
     @Composable
@@ -248,16 +617,8 @@ class MainActivity : ComponentActivity() {
                     val internalPath = assets.imagePaths[id]?.absolutePath ?: "NOT FOUND IN CACHE"
                     val zipPath = assets.originalImagePaths[id] ?: "NO MAPPING FOUND"
                     
-                    val expectedZipPath = remember(id) {
-                        val parts = id.split("/")
-                        val typePath = if (parts.size > 1) parts.dropLast(1).joinToString("/") + "/" else ""
-                        val fileName = parts.last().replace(":", "_")
-                        "inventory_images/$typePath$fileName.png"
-                    }
-                    
-                    DebugRow("Expected Zip Path", expectedZipPath)
-                    DebugRow("Actual Zip Path Found", zipPath)
-                    DebugRow("Cache File Path", internalPath)
+                    DebugRow("Internal Storage Path", internalPath)
+                    DebugRow("Source ZIP Path", zipPath)
                     
                     val type = if (id.contains("/")) id.substringBefore("/") else "item/block"
                     DebugRow("Inferred Type", type)
@@ -280,63 +641,52 @@ class MainActivity : ComponentActivity() {
     }
 
     @Composable
-    fun LoadingOverlay(progress: Float) {
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(Color.Black.copy(alpha = 0.5f))
-                .clickable(enabled = false) {},
-            contentAlignment = Alignment.Center
+    fun IndexingBanner(progress: Float, message: String, modifier: Modifier = Modifier) {
+        Card(
+            shape = RoundedCornerShape(12.dp),
+            elevation = 8.dp,
+            modifier = modifier.fillMaxWidth()
         ) {
-            Card(
-                shape = RoundedCornerShape(16.dp),
-                elevation = 8.dp,
-                modifier = Modifier.fillMaxWidth(0.8f)
-            ) {
-                Column(
-                    modifier = Modifier.padding(24.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally
-                ) {
-                    Text("Loading Assets", style = MaterialTheme.typography.h6, fontWeight = FontWeight.Bold)
-                    Spacer(Modifier.height(16.dp))
-                    LinearProgressIndicator(
-                        progress = progress,
-                        modifier = Modifier.fillMaxWidth().height(8.dp),
-                        color = MaterialTheme.colors.primary,
-                        backgroundColor = MaterialTheme.colors.onSurface.copy(alpha = 0.12f)
-                    )
-                    Spacer(Modifier.height(8.dp))
-                    Text(
-                        text = "${(progress * 100).toInt()}%",
-                        style = MaterialTheme.typography.body2,
-                        color = MaterialTheme.colors.onSurface.copy(alpha = 0.6f)
-                    )
-                }
+            Column(modifier = Modifier.padding(12.dp)) {
+                Text(message, style = MaterialTheme.typography.subtitle2, fontWeight = FontWeight.SemiBold)
+                Spacer(Modifier.height(6.dp))
+                LinearProgressIndicator(
+                    progress = progress.coerceIn(0f, 1f),
+                    modifier = Modifier.fillMaxWidth().height(6.dp),
+                    color = MaterialTheme.colors.primary,
+                    backgroundColor = MaterialTheme.colors.onSurface.copy(alpha = 0.12f)
+                )
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    text = "${(progress * 100).toInt()}%",
+                    style = MaterialTheme.typography.caption,
+                    color = MaterialTheme.colors.onSurface.copy(alpha = 0.7f)
+                )
             }
         }
     }
 
     @Composable
     fun ImportLibrary(
-        importedFiles: List<File>,
-        onFileSelected: (File) -> Unit,
-        onFileDelete: (File) -> Unit,
+        importedFolders: List<File>,
+        onFolderSelected: (File) -> Unit,
+        onFolderDelete: (File) -> Unit,
         onImportClick: () -> Unit
     ) {
         Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
-            Text("Imported Assets", style = MaterialTheme.typography.h6, color = MaterialTheme.colors.primary)
+            Text("Asset Library", style = MaterialTheme.typography.h6, color = MaterialTheme.colors.primary)
             Spacer(Modifier.height(8.dp))
             
-            if (importedFiles.isEmpty()) {
+            if (importedFolders.isEmpty()) {
                 WelcomeScreen(onImportClick)
             } else {
                 LazyColumn(modifier = Modifier.weight(1f)) {
-                    items(importedFiles) { file ->
+                    items(importedFolders) { folder ->
                         Card(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .padding(vertical = 4.dp)
-                                .clickable { onFileSelected(file) },
+                                .clickable { onFolderSelected(folder) },
                             elevation = 2.dp,
                             shape = RoundedCornerShape(8.dp)
                         ) {
@@ -344,10 +694,12 @@ class MainActivity : ComponentActivity() {
                                 modifier = Modifier.padding(16.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Icon(Icons.Default.Description, contentDescription = null, tint = Color.Gray)
+                                Icon(Icons.Default.Inventory, contentDescription = null, tint = MaterialTheme.colors.primary.copy(alpha = 0.7f))
                                 Spacer(Modifier.width(16.dp))
-                                Text(file.name, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                IconButton(onClick = { onFileDelete(file) }) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(folder.name, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                }
+                                IconButton(onClick = { onFolderDelete(folder) }) {
                                     Icon(Icons.Default.Delete, contentDescription = null, tint = Color.Red.copy(alpha = 0.6f))
                                 }
                             }
@@ -361,6 +713,8 @@ class MainActivity : ComponentActivity() {
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(12.dp)
                 ) {
+                    Icon(Icons.Default.Add, contentDescription = null)
+                    Spacer(Modifier.width(8.dp))
                     Text("IMPORT NEW .AEI")
                 }
             }
@@ -400,7 +754,7 @@ class MainActivity : ComponentActivity() {
             }
             
             Divider(Modifier.padding(vertical = 8.dp))
-            Text("App Version: 1.0", style = MaterialTheme.typography.caption, color = Color.Gray)
+            Text("App Version: 1.2", style = MaterialTheme.typography.caption, color = Color.Gray)
         }
     }
 
@@ -481,101 +835,10 @@ class MainActivity : ComponentActivity() {
     }
 
     @Composable
-    fun RecipeBrowserDialog(recipes: List<RecipeDump>, assets: RecipeAssets, onDismiss: () -> Unit) {
-        var currentIndex by remember { mutableIntStateOf(0) }
-        val currentRecipe = recipes[currentIndex]
-
-        Dialog(onDismissRequest = onDismiss) {
-            Card(
-                shape = RoundedCornerShape(12.dp),
-                elevation = 8.dp,
-                modifier = Modifier.fillMaxWidth(0.95f).wrapContentHeight()
-            ) {
-                Column(modifier = Modifier.padding(16.dp).verticalScroll(rememberScrollState())) {
-                    Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text("Recipe", style = MaterialTheme.typography.subtitle2, color = MaterialTheme.colors.primary)
-                            Text(currentRecipe.recipeType, fontSize = 11.sp, color = Color.Gray, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        }
-                        
-                        if (recipes.size > 1) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                IconButton(onClick = { if (currentIndex > 0) currentIndex-- }, enabled = currentIndex > 0) {
-                                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = null, modifier = Modifier.size(20.dp))
-                                }
-                                Text("${currentIndex + 1} / ${recipes.size}", fontSize = 13.sp, fontWeight = FontWeight.Bold)
-                                IconButton(onClick = { if (currentIndex < recipes.size - 1) currentIndex++ }, enabled = currentIndex < recipes.size - 1) {
-                                    Icon(Icons.AutoMirrored.Filled.ArrowForward, contentDescription = null, modifier = Modifier.size(20.dp))
-                                }
-                            }
-                        }
-                    }
-
-                    Divider(Modifier.padding(vertical = 8.dp))
-                    Text("Outputs:", fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                    currentRecipe.slots.filter { it.role == "OUTPUT" }.forEach { slot ->
-                        slot.ingredients.forEach { ing ->
-                            val id = ing.getResolvedId() ?: "Unknown"
-                            IngredientRow(id, ing.count?.toLong() ?: ing.amount ?: 1L, assets)
-                        }
-                    }
-
-                    Spacer(Modifier.height(12.dp))
-                    Text("Inputs:", fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                    val compressedInputs = remember(currentRecipe) {
-                        currentRecipe.slots
-                            .filter { it.role == "INPUT" }
-                            .flatMap { it.ingredients }
-                            .filter { it.getResolvedId() != null }
-                            .groupBy { it.getResolvedId() ?: "Unknown" }
-                            .mapValues { (_, ings) -> ings.sumOf { (it.count?.toLong() ?: it.amount ?: 1L) } }
-                    }
-
-                    if (compressedInputs.isEmpty()) {
-                        Text("No inputs", fontSize = 13.sp, color = Color.Gray, modifier = Modifier.padding(start = 8.dp))
-                    } else {
-                        compressedInputs.forEach { (id, qty) ->
-                            IngredientRow(id, qty, assets)
-                        }
-                    }
-
-                    Spacer(Modifier.height(16.dp))
-                    Button(onClick = onDismiss, modifier = Modifier.align(Alignment.End), shape = RoundedCornerShape(8.dp)) {
-                        Text("CLOSE")
-                    }
-                }
-            }
-        }
-    }
-
-    @Composable
-    fun IngredientRow(id: String, qty: Long, assets: RecipeAssets) {
-        val name = assets.getTranslation(id)
-        var bitmap by remember(id, assets) { mutableStateOf<Bitmap?>(null) }
-
-        LaunchedEffect(id, assets) {
-            withContext(Dispatchers.IO) {
-                bitmap = AssetManager.loadBitmap(assets.imagePaths[id])
-            }
-        }
-
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.padding(start = 8.dp, top = 4.dp, bottom = 4.dp)
-        ) {
-            bitmap?.let {
-                Image(bitmap = it.asImageBitmap(), contentDescription = null, modifier = Modifier.size(28.dp))
-            } ?: MissingTexturePlaceholder(Modifier.size(28.dp))
-            
-            Spacer(Modifier.width(8.dp))
-            Text(name, fontSize = 14.sp, modifier = Modifier.weight(1f))
-            Text("x$qty", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colors.primary)
-        }
-    }
-
-    @Composable
     fun WelcomeScreen(onImport: () -> Unit) {
         Column(modifier = Modifier.fillMaxSize().padding(32.dp), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
+            Icon(Icons.Default.Inventory, contentDescription = null, modifier = Modifier.size(100.dp), tint = MaterialTheme.colors.primary.copy(alpha = 0.2f))
+            Spacer(Modifier.height(16.dp))
             Text("AEI Viewer", style = MaterialTheme.typography.h4, fontWeight = FontWeight.Bold)
             Spacer(Modifier.height(8.dp))
             Text("Browse Minecraft recipes with ease.", textAlign = TextAlign.Center, color = Color.Gray)

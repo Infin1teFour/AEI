@@ -9,13 +9,34 @@ data class RecipeAssets(
     val uniqueItems: List<String>,
     val recipesByOutput: Map<String, List<RecipeDump>>
 ) {
-    // Helper to get translation regardless of case or type prefix
+    // Translation keys are uniform; stack/type prefixes should not affect lookup.
     fun getTranslation(id: String): String {
-        return translations[id] 
-            ?: translations[id.lowercase()] 
-            ?: translations[id.substringAfter("/")] 
-            ?: translations[id.substringAfter("/").lowercase()]
-            ?: id
+        val lower = id.lowercase()
+        val normalized = normalizeTranslationId(lower)
+
+        translations[id]?.let { return it }
+        translations[lower]?.let { return it }
+        translations[normalized]?.let { return it }
+
+        return id
+    }
+
+    private fun normalizeTranslationId(id: String): String {
+        var current = id
+
+        while (true) {
+            val slashIndex = current.indexOf('/')
+            if (slashIndex <= 0) return current
+
+            val prefix = current.substring(0, slashIndex)
+            // Translation keys are namespaced IDs (modid:path).
+            // Strip any leading non-namespaced type segment like fluid_stack/, mod_stack/, etc.
+            if (':' in prefix) {
+                return current
+            }
+
+            current = current.substring(slashIndex + 1)
+        }
     }
 }
 
