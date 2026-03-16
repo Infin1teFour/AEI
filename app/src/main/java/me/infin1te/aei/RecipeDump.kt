@@ -3,39 +3,31 @@ package me.infin1te.aei
 import java.io.File
 
 data class RecipeAssets(
+    val libraryFolderName: String,
+    val sourceArchiveFile: File,
+    val imageIndexFile: File,
+    val imageCacheDir: File,
     val translations: Map<String, String>,
-    val imagePaths: Map<String, File>,
-    val originalImagePaths: Map<String, String>,
     val uniqueItems: List<String>,
     val recipesByOutput: Map<String, List<RecipeDump>>
 ) {
-    // Translation keys are uniform; stack/type prefixes should not affect lookup.
     fun getTranslation(id: String): String {
         val lower = id.lowercase()
-        val normalized = normalizeTranslationId(lower)
-
-        translations[id]?.let { return it }
         translations[lower]?.let { return it }
-        translations[normalized]?.let { return it }
+
+        legacyAliasCandidates(lower).forEach { alias ->
+            translations[alias]?.let { return it }
+        }
 
         return id
     }
 
-    private fun normalizeTranslationId(id: String): String {
-        var current = id
-
-        while (true) {
-            val slashIndex = current.indexOf('/')
-            if (slashIndex <= 0) return current
-
-            val prefix = current.substring(0, slashIndex)
-            // Translation keys are namespaced IDs (modid:path).
-            // Strip any leading non-namespaced type segment like fluid_stack/, mod_stack/, etc.
-            if (':' in prefix) {
-                return current
-            }
-
-            current = current.substring(slashIndex + 1)
+    private fun legacyAliasCandidates(id: String): Sequence<String> = sequence {
+        if (id.startsWith("fluid/")) {
+            yield("fluid_stack/${id.substringAfter('/')}")
+        }
+        if (id.startsWith("fluid_stack/")) {
+            yield("fluid/${id.substringAfter('/')}")
         }
     }
 }
@@ -59,15 +51,17 @@ data class Ingredient(
     val fluid: String? = null,
     val amount: Long? = null,
     val nbt: String? = null,
+    val raw: String? = null,
     val unknown: String? = null
 ) {
     fun getResolvedId(): String? {
-        val baseId = id ?: item ?: fluid ?: return null
+        val baseId = (id ?: item ?: fluid)?.lowercase() ?: return null
+        val normalizedType = type?.trim()?.lowercase()
         val result = when {
-            type == "fluid" -> "fluid_stack/$baseId"
-            type != null && type != "item" && type != "block" -> "$type/$baseId"
+            normalizedType == "fluid" -> "fluid/$baseId"
+            normalizedType != null && normalizedType != "item" && normalizedType != "block" -> "$normalizedType/$baseId"
             else -> baseId
         }
-        return result.lowercase()
+        return result
     }
 }
